@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GİB Tahsilat → Excel
 // @namespace    gib-tahsilat-excel
-// @version      1.0.18
+// @version      1.0.19
 // @description  Dijital Vergi Dairesi "Ödeme Alındılarım ve Tahsilat Bilgilerim" ekranındaki tahsilatları DETAYLARIYLA birlikte tek tıkla Excel'e aktarır. Tamamen ücretsiz, veriler bilgisayardan dışarı çıkmaz.
 // @updateURL    https://raw.githubusercontent.com/muhasebeahmetozmen/gib-tahsilat-excel/main/dist/gib-tahsilat-excel.user.js
 // @downloadURL  https://raw.githubusercontent.com/muhasebeahmetozmen/gib-tahsilat-excel/main/dist/gib-tahsilat-excel.user.js
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* Bu dosya build.py tarafindan uretildi. Elle duzenleme; src/ altini duzenle. */
-/* Surum: 1.0.18 */
+/* Surum: 1.0.19 */
 
 (function () {
 'use strict';
@@ -403,8 +403,30 @@ const Istemci = (function () {
    * "kredi limiti"…) ve script kendi kendini durdurabilir. Artık yalnızca
    * ISTEK sınırını anlatan kalıplar sayılır.
    */
-  const LIMIT_DESENI =
-    /(istek|sorgu|servis|talep)\s*(sayısı|adedi)?\s*(limit|sınır)|limit(in|ine|ini)?\s*(ulaş|aşıl|doldu)|kota\s*(doldu|aşıl)|too\s*many\s*requests|rate\s*limit|çok\s*fazla\s*istek|aşırı\s*yoğunluk/i;
+  /*
+   * TÜRKÇE TUZAĞI: JavaScript'in /i bayrağı Türkçe büyük İ'yi (U+0130) i ile
+   * EŞLEŞTİRMEZ ("İ".toUpperCase() = "İ" ama "i".toUpperCase() = "I").
+   * Yani /istek/i deseni GİB'in "Servis İstek Limiti Aşıldı" mesajını
+   * KAÇIRIR. Bu yüzden karşılaştırma öncesi metin sadeleştirilir.
+   */
+  function sadelestir(s) {
+    return Yard.metin(s)
+      .replace(/[İIı]/g, 'i').replace(/[Şş]/g, 's').replace(/[Ğğ]/g, 'g')
+      .replace(/[Üü]/g, 'u').replace(/[Öö]/g, 'o').replace(/[Çç]/g, 'c')
+      .toLowerCase();
+  }
+
+  /* Desen SADELEŞTİRİLMİŞ metne uygulanır; hepsi ASCII. */
+  const LIMIT_DESENI = new RegExp([
+    // GİB'in bilinen metni: "Servis İstek Limiti Aşıldı Lütfen Daha Sonra Deneyiniz"
+    '(istek|sorgu|servis|talep)\\s*(sayisi|adedi)?\\s*(limit|sinir)',
+    'limit\\w*\\s*(asil|dolmus|doldu|ulas)',
+    '(sinir|kota)\\w*\\s*(asil|doldu|ulas)',
+    'too\\s*many\\s*requests', 'rate\\s*limit',
+    'cok\\s*fazla\\s*(istek|talep|sorgu)', 'asiri\\s*yogunluk'
+  ].join('|'), 'i');
+
+  function limitMi(mesaj) { return LIMIT_DESENI.test(sadelestir(mesaj)); }
 
   /*
    * Hata metni artık GİB'in KENDİ sözlerini gösterir. Eskiden uydurduğumuz
@@ -623,7 +645,7 @@ const Istemci = (function () {
     // Limit uyarısı HTTP 200 ile de gelebiliyor; gövdedeki mesaj denetlenir.
     const mesaj = sunucuMesaji(veri);
     if (mesaj) {
-      if (LIMIT_DESENI.test(mesaj)) throw limitHatasi(mesaj);
+      if (limitMi(mesaj)) throw limitHatasi(mesaj);
       Yard.bildir('uyari', 'Sunucu mesajı: ' + mesaj);
     }
 
@@ -677,6 +699,7 @@ const Istemci = (function () {
   return {
     ham: ham,
     getHam: getHam,
+    limitMi: limitMi,   // test edilebilsin diye dışarı açılır
     istek: istek,
     tumSayfalar: tumSayfalar,
     iptalEt: iptalEt,
