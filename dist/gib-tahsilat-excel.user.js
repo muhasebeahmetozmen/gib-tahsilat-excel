@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GİB Tahsilat → Excel
 // @namespace    gib-tahsilat-excel
-// @version      1.0.14
+// @version      1.0.16
 // @description  Dijital Vergi Dairesi "Ödeme Alındılarım ve Tahsilat Bilgilerim" ekranındaki tahsilatları DETAYLARIYLA birlikte tek tıkla Excel'e aktarır. Tamamen ücretsiz, veriler bilgisayardan dışarı çıkmaz.
 // @updateURL    https://raw.githubusercontent.com/muhasebeahmetozmen/gib-tahsilat-excel/main/dist/gib-tahsilat-excel.user.js
 // @downloadURL  https://raw.githubusercontent.com/muhasebeahmetozmen/gib-tahsilat-excel/main/dist/gib-tahsilat-excel.user.js
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* Bu dosya build.py tarafindan uretildi. Elle duzenleme; src/ altini duzenle. */
-/* Surum: 1.0.14 */
+/* Surum: 1.0.16 */
 
 (function () {
 'use strict';
@@ -456,6 +456,42 @@ const Istemci = (function () {
     }
   }
 
+  /*
+   * Serbest adresten GET. Alındı PDF'i iki adımlı geliyor: önce uç nokta bir
+   * `reportLink` veriyor, PDF o adresten indiriliyor. O ikinci istek de aynı
+   * nezaket ve hata kurallarına tabi olsun diye buradan geçer.
+   */
+  async function getHam(url, denemeler) {
+    denemeler = denemeler || 2;
+    for (let deneme = 1; deneme <= denemeler; deneme++) {
+      iptalKontrol();
+      await nezaketBekle();
+
+      let yanit;
+      try {
+        yanit = await fetch(url, { method: 'GET', credentials: 'include' });
+      } catch (e) {
+        if (deneme === denemeler) throw new Error('Ağ hatası: ' + (e && e.message ? e.message : e));
+        await Yard.bekle(800 * deneme);
+        continue;
+      }
+
+      if (yanit.status === 401 || yanit.status === 403) {
+        const e = new Error('Oturum geçersiz (HTTP ' + yanit.status + ').');
+        e.oturum = true;
+        throw e;
+      }
+      if (yanit.status === 429) throw limitHatasi('HTTP 429');
+      if (yanit.status >= 500) {
+        if (deneme === denemeler) throw new Error('Sunucu yanıt vermiyor (HTTP ' + yanit.status + ').');
+        await Yard.bekle(1500 * deneme);
+        continue;
+      }
+      if (!yanit.ok) throw new Error('Beklenmeyen yanıt: HTTP ' + yanit.status);
+      return yanit;
+    }
+  }
+
   async function istek(yol, govde, denemeler) {
     const yanit = await ham(yol, govde, denemeler);
 
@@ -522,6 +558,7 @@ const Istemci = (function () {
 
   return {
     ham: ham,
+    getHam: getHam,
     istek: istek,
     tumSayfalar: tumSayfalar,
     iptalEt: iptalEt,
@@ -1399,11 +1436,20 @@ const Arayuz = (function () {
       kismi.classList.remove('gizli');
     }
 
-    if (!n || !aktifEkran.pdfleriTopla) pdf.classList.add('gizli');
-    else {
-      pdf.textContent = 'Alındı PDF\'lerini indir (' + n + ' alındı)';
-      pdf.classList.remove('gizli');
+    // PDF düğmesi yalnızca gerçekten indirilebilir alındı varsa görünür.
+    if (!n || !aktifEkran.pdfleriTopla || !aktifEkran.pdfSayisi) {
+      pdf.classList.add('gizli');
+      return;
     }
+    const s = aktifEkran.pdfSayisi(bekleyen.kayitlar);
+    if (!s.indirilebilir) {
+      pdf.classList.add('gizli');
+      return;
+    }
+    pdf.textContent = 'Alındı PDF\'lerini indir (' +
+      (s.indirilebilir < s.toplam ? s.indirilebilir + '/' + s.toplam : String(s.indirilebilir)) +
+      ' alındı)';
+    pdf.classList.remove('gizli');
   }
 
   /* --------------------------------------------------------- filtre yükleme */
@@ -2246,6 +2292,45 @@ const Ekran = (function () {
     return null;
   }
 
+  /* Yanıttaki rapor bağlantısını bul: önce bilinen alan, sonra URL benzeri herhangi bir alan */
+  function jsondanBaglanti(veri) {
+    if (!veri || typeof veri !== 'object') return '';
+    const dogrudan = Yard.metin(veri.reportLink).trim();
+    if (dogrudan) return dogrudan;
+
+    const yigin = [veri];
+    let adim = 0;
+    while (yigin.length && adim++ < 2000) {
+      const d = yigin.pop();
+      if (!d || typeof d !== 'object') continue;
+      for (const k in d) {
+        const v = d[k];
+        if (typeof v === 'string' && /^(https?:\/\/|\/)\S+$/i.test(v) && v.length > 10) return v;
+        if (v && typeof v === 'object') yigin.push(v);
+      }
+    }
+    return '';
+  }
+
+  async function baglantidanPdf(bag) {
+    const url = /^https?:\/\//i.test(bag) ? bag : (bag.charAt(0) === '/' ? bag : '/' + bag);
+    const yanit = await Istemci.getHam(url, 2);
+    const bayt = new Uint8Array(await yanit.arrayBuffer());
+    if (pdfMi(bayt)) return bayt;
+    try {
+      const b2 = base64Bayt(new TextDecoder().decode(bayt).trim());
+      if (pdfMi(b2)) return b2;
+    } catch (_) {}
+    throw new Error('Rapor bağlantısından gelen içerik PDF değil.');
+  }
+
+  /*
+   * Alındı PDF'i İKİ ADIMLI gelir (gerçek GİB yanıtıyla doğrulandı):
+   *   1) alindi-indir  ->  { messages: null, reportLink: "<mutlak adres>" }
+   *   2) o adresten GET ->  PDF baytları
+   * Yine de gövdeye gömülü base64 ve doğrudan ikili yanıt yolları yedek olarak
+   * korunur; GİB biçimi değiştirirse script çalışmaya devam etsin.
+   */
   async function alindiPdf(alindi, yil) {
     const yanit = await Istemci.ham(PDF_YOL, {
       meta: { pagination: { pageNo: 1, pageSize: 10 }, sortFieldName: 'id', sortType: 'ASC', filters: [] },
@@ -2256,19 +2341,46 @@ const Ekran = (function () {
 
     if (tip.indexOf('json') !== -1) {
       const veri = await yanit.json();
-      const b = jsondanPdf(veri);
-      if (b) return b;
-      throw new Error('Yanıtta PDF verisi bulunamadı.');
+      const gomulu = jsondanPdf(veri);
+      if (gomulu) return gomulu;
+
+      const bag = jsondanBaglanti(veri);
+      if (bag) return await baglantidanPdf(bag);
+
+      throw new Error('Yanıtta PDF verisi veya rapor bağlantısı yok.');
     }
 
     const bayt = new Uint8Array(await yanit.arrayBuffer());
     if (pdfMi(bayt)) return bayt;
-    // bazı uçlar düz metin olarak base64 döndürebiliyor
     try {
       const b2 = base64Bayt(new TextDecoder().decode(bayt).trim());
       if (pdfMi(b2)) return b2;
     } catch (_) {}
     throw new Error('Yanıt PDF değil (' + (tip || 'tip belirtilmemiş') + ').');
+  }
+
+  /*
+   * Her tahsilatın indirilebilir alındısı yoktur; GİB bunu liste yanıtındaki
+   * `indir` bayrağıyla bildirir ("1" = İŞLEM YAP menüsünde "Alındı İndir" çıkar).
+   * Bayrağa bakmak menüyü DOM'dan taramaktan hem kesin hem bedavadır: bilgi
+   * zaten elimizdeki yanıtta var, ek istek gerekmez.
+   */
+  function pdfVarMi(alindi) {
+    return Yard.metin((alindi || {}).indir).trim() === '1';
+  }
+
+  /* Sonuç kümesinde kaç alındının PDF'i var? -> {indirilebilir, toplam} */
+  function pdfSayisi(kayitlar) {
+    const gorulen = {};
+    let indirilebilir = 0, toplam = 0;
+    for (let i = 0; i < (kayitlar || []).length; i++) {
+      const a = kayitlar[i].alindi || {};
+      if (!a.alindiNo || gorulen[a.alindiNo]) continue;
+      gorulen[a.alindiNo] = 1;
+      toplam++;
+      if (pdfVarMi(a)) indirilebilir++;
+    }
+    return { indirilebilir: indirilebilir, toplam: toplam };
   }
 
   function pdfAdi(kayit) {
@@ -2284,7 +2396,13 @@ const Ekran = (function () {
   /* kayitlar -> [{ad, veri}] ; iptal ve oturum hataları yukarı fırlar */
   async function pdfleriTopla(kayitlar, ilerleme, cikti) {
     const gorulen = {};
-    let hata = 0;
+    const hedef = pdfSayisi(kayitlar).indirilebilir;
+    let hata = 0, atlanan = 0, sira = 0;
+
+    if (!hedef) {
+      Yard.bildir('uyari', 'Bu sonuçtaki hiçbir tahsilatın indirilebilir alındısı yok.');
+      return cikti;
+    }
 
     for (let i = 0; i < kayitlar.length; i++) {
       Istemci.iptalKontrol();
@@ -2292,9 +2410,10 @@ const Ekran = (function () {
       const a = k.alindi || {};
       if (!a.alindiNo || !a.secureId || gorulen[a.alindiNo]) continue;
       gorulen[a.alindiNo] = 1;
+      if (!pdfVarMi(a)) { atlanan++; continue; }   // bu tahsilatın alındısı indirilemiyor
 
-      ilerleme('Alındı PDF ' + (i + 1) + '/' + kayitlar.length,
-               Math.round((i + 1) / Math.max(1, kayitlar.length) * 100));
+      sira++;
+      ilerleme('Alındı PDF ' + sira + '/' + hedef, Math.round(sira / hedef * 100));
       try {
         cikti.push({ ad: pdfAdi(k), veri: await alindiPdf(a, k.yil) });
       } catch (e) {
@@ -2304,6 +2423,9 @@ const Ekran = (function () {
       }
     }
 
+    if (atlanan) {
+      Yard.bildir('bilgi', atlanan + ' tahsilatta indirilebilir alındı yok, atlandı.');
+    }
     if (hata) Yard.bildir('uyari', hata + ' alındının PDF\'i alınamadı.');
     return cikti;
   }
@@ -2324,6 +2446,7 @@ const Ekran = (function () {
     excelUret: excelUret,
     dosyaAdi: dosyaAdi,
     pdfleriTopla: pdfleriTopla,
+    pdfSayisi: pdfSayisi,
     pdfZipAdi: pdfZipAdi,
     mukellefBul: mukellefBul
   };
