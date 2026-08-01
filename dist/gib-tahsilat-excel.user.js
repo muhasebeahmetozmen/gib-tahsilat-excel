@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GİB Tahsilat → Excel
 // @namespace    gib-tahsilat-excel
-// @version      1.0.16
+// @version      1.0.17
 // @description  Dijital Vergi Dairesi "Ödeme Alındılarım ve Tahsilat Bilgilerim" ekranındaki tahsilatları DETAYLARIYLA birlikte tek tıkla Excel'e aktarır. Tamamen ücretsiz, veriler bilgisayardan dışarı çıkmaz.
 // @updateURL    https://raw.githubusercontent.com/muhasebeahmetozmen/gib-tahsilat-excel/main/dist/gib-tahsilat-excel.user.js
 // @downloadURL  https://raw.githubusercontent.com/muhasebeahmetozmen/gib-tahsilat-excel/main/dist/gib-tahsilat-excel.user.js
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* Bu dosya build.py tarafindan uretildi. Elle duzenleme; src/ altini duzenle. */
-/* Surum: 1.0.16 */
+/* Surum: 1.0.17 */
 
 (function () {
 'use strict';
@@ -73,7 +73,14 @@ const Yard = (function () {
    * Ay-yıl girdisini GİB'in beklediği "YYYYAA" biçimine çevirir.
    * Kabul edilenler: "06.2026" (panel biçimi), "2026-06" (takvim), "06/2026", "062026", "202606"
    * Boşsa ''  ·  çözülemezse null (çağıran kullanıcıyı uyarsın)
+   *
+   * YIL DENETİMİ ZORUNLU: "01.0620" gibi yarım kalmış bir girdi sessizce
+   * kabul edilirse dönem süzgeci fiilen kalkar ve kullanıcı bunu fark etmez.
+   * Makul aralık dışındaki yıl null döndürür ki çağıran açık hata versin.
    */
+  const YIL_ALT = 2000;
+  function yilUst() { return new Date().getFullYear() + 1; }
+
   function ayaCevir(v) {
     const s = metin(v).trim();
     if (!s) return '';
@@ -86,14 +93,45 @@ const Yard = (function () {
     else if ((m = s.match(/^(\d{6})$/))) {
       // 6 hane: baştaki 4 hane geçerli bir yılsa YYYYAA, değilse AAYYYY
       const bas4 = parseInt(s.slice(0, 4), 10);
-      if (bas4 >= 2000 && bas4 <= 2100) { yil = s.slice(0, 4); ay = s.slice(4); }
+      if (bas4 >= YIL_ALT && bas4 <= yilUst()) { yil = s.slice(0, 4); ay = s.slice(4); }
       else { ay = s.slice(0, 2); yil = s.slice(2); }
     }
 
     if (!yil) return null;
+    const y = parseInt(yil, 10);
+    if (!(y >= YIL_ALT && y <= yilUst())) return null;
     const a = parseInt(ay, 10);
     if (!(a >= 1 && a <= 12)) return null;
     return yil + String(a).padStart(2, '0');
+  }
+
+  /*
+   * Panelin "AA.YYYY" maskesi. Ham girdiden gösterilecek değeri üretir.
+   * Tam tarih girildiğinde (01.06.2026) ay+yıl DOĞRU çıkarılır; 6 haneden
+   * fazlası sessizce kırpılmaz, çağıran kullanıcıyı uyarabilsin diye bildirilir.
+   */
+  function ayMaskesi(ham) {
+    let d = metin(ham).replace(/\D/g, '');
+    let uyari = '';
+
+    if (d.length > 6) {
+      if (d.length === 8) {
+        // gg.aa.yyyy veya yyyy.aa.gg -> aa + yyyy
+        const bas4 = parseInt(d.slice(0, 4), 10);
+        d = (bas4 >= YIL_ALT && bas4 <= yilUst())
+          ? (d.slice(4, 6) + d.slice(0, 4))
+          : (d.slice(2, 4) + d.slice(4));
+        uyari = 'Tam tarih girildi; ay ve yıl alındı.';
+      } else {
+        d = d.slice(0, 6);
+        uyari = 'Ay alanı AA.YYYY biçimindedir; fazla haneler kullanılmadı.';
+      }
+    }
+
+    return {
+      deger: (d.length > 2) ? (d.slice(0, 2) + '.' + d.slice(2)) : d,
+      uyari: uyari
+    };
   }
 
   /* "202604" -> "04.2026" (panelde göstermek için) */
@@ -104,7 +142,7 @@ const Yard = (function () {
 
   /*
    * Şirket unvanlarını dosya adında kullanılabilecek kadar kısaltır.
-   * "ÖZMEN OTOMOTİV SANAYİ VE TİCARET ANONİM ŞİRKETİ" -> "ÖZMEN OTO. SAN. TİC. A.Ş."
+   * "DENEME OTOMOTİV SANAYİ VE TİCARET ANONİM ŞİRKETİ" -> "DENEME OTO. SAN. TİC. A.Ş."
    * Gerçek kişilerde (ad soyad) hiçbir şey değişmez.
    */
   const COKLU_KISALTMA = [
@@ -188,6 +226,7 @@ const Yard = (function () {
     sayiCoz: sayiCoz,
     metin: metin,
     ayaCevir: ayaCevir,
+    ayMaskesi: ayMaskesi,
     aydanMetne: aydanMetne,
     kisaltUnvan: kisaltUnvan,
     damga: damga,
@@ -383,10 +422,16 @@ const Istemci = (function () {
     }
   }
 
+  /*
+   * Sıra bekle. Slot PEŞİN rezerve edilir: iki akış aynı anda beklemeye
+   * girerse aynı boş milisaniyeyi hesaplayıp aynı anda istek atmasın.
+   * (Rezervasyon olmadan "sıralı istek" garantisi yalnızca kâğıt üstünde kalır.)
+   */
   async function nezaketBekle() {
-    const gecen = Date.now() - sonIstek;
-    if (gecen < GECIKME_MS) await Yard.bekle(GECIKME_MS - gecen);
-    sonIstek = Date.now();
+    const simdi = Date.now();
+    const slot = Math.max(simdi, sonIstek + GECIKME_MS);
+    sonIstek = slot;
+    if (slot > simdi) await Yard.bekle(slot - simdi);
   }
 
   function sunucuMesaji(veri) {
@@ -437,23 +482,35 @@ const Istemci = (function () {
       }
 
       if (yanit.status === 429) {
-        // Bir kez, uzun bekleyerek denenir; ısrar edilmez.
-        if (deneme >= 2) throw limitHatasi('HTTP 429');
+        /* Bir kez, uzun bekleyerek denenir; ısrar edilmez.
+           `deneme >= denemeler` şartı ŞART: denemeler=1 ile çağrıldığında
+           aksi hâlde döngü return'süz biter, fonksiyon undefined döner ve
+           .limit bayrağı kaybolur — panel "kayıt yok" sanır. */
+        if (deneme >= 2 || deneme >= denemeler) throw limitHatasi('HTTP 429');
         Yard.bildir('uyari', 'Sunucu istek sınırı uyarısı verdi, 5 saniye beklenip bir kez denenecek…');
         await Yard.bekle(5000);
         continue;
       }
 
       if (yanit.status >= 500) {
-        if (deneme === denemeler) throw new Error('Sunucu şu an yanıt vermiyor (HTTP ' + yanit.status + ').');
+        if (deneme >= denemeler) throw new Error('Sunucu şu an yanıt vermiyor (HTTP ' + yanit.status + ').');
         Yard.bildir('uyari', 'Sunucu meşgul (HTTP ' + yanit.status + '), bekleyip tekrar denenecek…');
         await Yard.bekle(1500 * deneme);
         continue;
       }
 
-      if (!yanit.ok) throw new Error('Beklenmeyen yanıt: HTTP ' + yanit.status);
+      if (!yanit.ok) {
+        // Durum kodu çağırana taşınır: yıl taraması "desteklenmeyen yıl" (400)
+        // ile gerçek arızayı ayırt edebilsin.
+        const e = new Error('Beklenmeyen yanıt: HTTP ' + yanit.status);
+        e.durum = yanit.status;
+        throw e;
+      }
       return yanit;
     }
+
+    // Buraya düşmemeli; düşerse sessiz undefined yerine açık hata ver.
+    throw new Error('İstek tamamlanamadı (' + denemeler + ' deneme).');
   }
 
   /*
@@ -483,13 +540,19 @@ const Istemci = (function () {
       }
       if (yanit.status === 429) throw limitHatasi('HTTP 429');
       if (yanit.status >= 500) {
-        if (deneme === denemeler) throw new Error('Sunucu yanıt vermiyor (HTTP ' + yanit.status + ').');
+        if (deneme >= denemeler) throw new Error('Sunucu yanıt vermiyor (HTTP ' + yanit.status + ').');
         await Yard.bekle(1500 * deneme);
         continue;
       }
-      if (!yanit.ok) throw new Error('Beklenmeyen yanıt: HTTP ' + yanit.status);
+      if (!yanit.ok) {
+        const e = new Error('Beklenmeyen yanıt: HTTP ' + yanit.status);
+        e.durum = yanit.status;
+        throw e;
+      }
       return yanit;
     }
+
+    throw new Error('İstek tamamlanamadı (' + denemeler + ' deneme).');
   }
 
   async function istek(yol, govde, denemeler) {
@@ -913,6 +976,17 @@ const Arayuz = (function () {
   let aktifEkran = null;
   let calisiyor = false;
   let filtrelerYuklendi = false;
+  /* Uçuştaki filtre yükleme sözü — aynı yükleme ikinci kez başlamasın. */
+  let filtreYukleniyor = null;
+  /*
+   * Çalışma jetonu. sifirla() senkron çalışır ama çalışan sorgu bir `await`
+   * üzerindedir; iptal istisnası sifirla'dan SONRA yakalanır ve ekranı yeniden
+   * boyar. Jeton olmadan önceki mükellefin özeti yeni mükellefin panelinde
+   * görünür. Her akış başında jeton alınır, sifirla() jetonu geçersizleştirir.
+   */
+  let calismaNo = 0;
+  /* araDoldur bir seçimi kendiliğinden sıfırlarsa mesajı durum satırına taşır. */
+  let secimSifirlandi = '';
   /* Son sorgunun sonucu: tamam=false ise çekim yarıda kalmıştır. */
   let bekleyen = { kayitlar: [], baglam: null, tamam: false };
   /* Panel (SPA gövdeyi silerse) yeniden kurulabiliyor; belge düzeyindeki
@@ -1058,7 +1132,9 @@ const Arayuz = (function () {
     if (a.tur === 'ay') {
       ic = '<div class="ayKutu">' +
            '<input type="text" class="ayMetin" id="a-' + a.anahtar + '" placeholder="AA.YYYY" ' +
-           'maxlength="7" inputmode="numeric" autocomplete="off">' +
+           /* maxlength 10: tam tarih yapıştırılabilsin ki maske ay+yılı doğru
+              çıkarabilsin; 7'de tarayıcı önce kırpıyor ve bilgi kayboluyordu */
+           'maxlength="10" inputmode="numeric" autocomplete="off">' +
            '<button type="button" class="takvimDugme" id="tk-' + a.anahtar + '" ' +
            'title="Takvimden seç" aria-label="Takvimden seç">' + TAKVIM_SVG + '</button>' +
            '<input type="month" class="gizliAy" id="ay-' + a.anahtar + '" tabindex="-1" aria-hidden="true">' +
@@ -1102,7 +1178,7 @@ const Arayuz = (function () {
           const v = (typeof a.varsayilan === 'function') ? a.varsayilan() : a.varsayilan;
           if (v !== undefined && v !== null) g.value = v;
         }
-        if (a.tur === 'ay') ayAlaniniBagla(a.anahtar);
+        if (a.tur === 'ay') ayAlaniniBagla(a);
       }
       if (a.aksiyon) aksiyonBagla(a);
     });
@@ -1113,32 +1189,56 @@ const Arayuz = (function () {
     if (!d) return;
     d.onclick = async function () {
       if (calisiyor) return;
+      const benim = calismaNo;
       mesgul(true);
       Istemci.sifirla();
       el('ilerlemeKutu').style.display = 'block';
+      secimSifirlandi = '';
       try {
         const sonuc = await a.aksiyon.calistir(durum, secimAl());
+        if (benim !== calismaNo) return;
         if (sonuc) uygulaSecenekler(sonuc);
-        durum('Tamamlandı.', 100);
+        durum(secimSifirlandi || 'Tamamlandı.', 100, !!secimSifirlandi);
       } catch (e) {
+        if (benim !== calismaNo) return;
         kayitEkle('hata', 'HATA: ' + (e && e.message ? e.message : e));
         durum('Hata oluştu.', 0, true);
       } finally {
-        mesgul(false);
+        if (benim === calismaNo) mesgul(false);
       }
     };
   }
 
   /* Maskeli ay-yıl alanı */
-  function ayAlaniniBagla(anahtar) {
+  function ayAlaniniBagla(a) {
+    const anahtar = a.anahtar;
+    const etiket = a.etiket || anahtar;
     const metinG = el('a-' + anahtar);
     const gizliG = el('ay-' + anahtar);
     const dugme = el('tk-' + anahtar);
     if (!metinG) return;
 
+    /* İmleç korunur: değeri her tuşta yeniden kurup imleci sona atmak, mevcut
+       bir dönemi düzeltmeyi imkânsız kılıyor ve sessizce bozuk değer bırakıyordu. */
     metinG.addEventListener('input', function () {
-      const d = metinG.value.replace(/\D/g, '').slice(0, 6);
-      metinG.value = (d.length > 2) ? (d.slice(0, 2) + '.' + d.slice(2)) : d;
+      const ham = metinG.value;
+      const imleç = metinG.selectionStart;
+      const oncekiHane = ham.slice(0, imleç === null ? ham.length : imleç)
+        .replace(/\D/g, '').length;
+
+      const m = Yard.ayMaskesi(ham);
+      if (m.deger === ham) return;
+      metinG.value = m.deger;
+
+      // imleci aynı HANE sırasına geri koy
+      let p = 0, sayac = 0;
+      while (p < m.deger.length && sayac < oncekiHane) {
+        if (m.deger.charCodeAt(p) >= 48 && m.deger.charCodeAt(p) <= 57) sayac++;
+        p++;
+      }
+      try { metinG.setSelectionRange(p, p); } catch (_) {}
+
+      if (m.uyari) Yard.bildir('uyari', '"' + etiket + '" — ' + m.uyari);
     });
 
     if (dugme && gizliG) {
@@ -1271,20 +1371,34 @@ const Arayuz = (function () {
     Object.keys(ara).forEach(araKapat);
   }
 
+  /* Kancayı ÇALIŞTIRMADAN kapatır. Sorgu başlarken kullanılır: sorgu seçimleri
+     zaten secimAl() ile canlı okur, listeleri tazelemek için GİB'e gitmek gereksiz. */
+  function araHepsiniKapatSessiz() {
+    Object.keys(ara).forEach(function (k) {
+      const p = el('araPop-' + k);
+      if (p) p.classList.add('gizli');
+      if (ara[k]) ara[k].acilistaki = null;
+    });
+  }
+
   async function degisinceCalistir(a) {
     if (calisiyor) return;
+    const benim = calismaNo;
     mesgul(true);
     Istemci.sifirla();
     el('ilerlemeKutu').style.display = 'block';
+    secimSifirlandi = '';
     try {
       const sonuc = await a.degisince(secimAl(), durum);
+      if (benim !== calismaNo) return;
       if (sonuc) uygulaSecenekler(sonuc);
-      durum('Listeler güncellendi.', 100);
+      durum(secimSifirlandi || 'Listeler güncellendi.', 100, !!secimSifirlandi);
     } catch (e) {
+      if (benim !== calismaNo) return;
       kayitEkle('uyari', 'Listeler yenilenemedi: ' + (e && e.message ? e.message : e));
       durum(e && e.limit ? e.message : 'Listeler yenilenemedi.', 0, true);
     } finally {
-      mesgul(false);
+      if (benim === calismaNo) mesgul(false);
     }
   }
 
@@ -1310,9 +1424,15 @@ const Arayuz = (function () {
         // Yıl gibi "boş = tümü" anlamına gelen alanlarda boşta bırakma:
         // istemeden çok daha büyük bir sorgu kurulmasın.
         ara[k].secili = [String(secenekler[0].deger)];
+        secimSifirlandi = '"' + ara[k].alan.etiket + '" seçiminiz bu listede yok, ' +
+          secenekler[0].ad + ' seçildi.';
+        Yard.bildir('uyari', secimSifirlandi);
       } else {
-        Yard.bildir('uyari', '"' + ara[k].alan.etiket + '" seçiminiz bu yıl(lar)da yok, ' +
-          'Tümü olarak sıfırlandı.');
+        // Süzgeç kendiliğinden kalktı: bu kullanıcının kastı değildi, gizli
+        // günlükte bırakılmaz — durum satırında da görünür.
+        secimSifirlandi = '"' + ara[k].alan.etiket + '" seçiminiz bu yıl(lar)da yok, ' +
+          'Tümü olarak sıfırlandı.';
+        Yard.bildir('uyari', secimSifirlandi);
       }
     }
     araMetniGuncelle(k);
@@ -1401,10 +1521,13 @@ const Arayuz = (function () {
   /* ---------------------------------------------------------- özet + kısmi */
   function ozetGoster(kayitlar) {
     const kap = el('ozet');
-    if (!aktifEkran.ozet || !kayitlar || !kayitlar.length) { kap.style.display = 'none'; return; }
+    /* Gizlemek yetmez, İÇERİK de silinir: gizli kalmış eski rakamlar bir
+       sonraki gösterimde önceki mükellefe ait olarak geri gelmesin. */
+    const gizle = function () { kap.style.display = 'none'; kap.innerHTML = ''; };
+    if (!aktifEkran.ozet || !kayitlar || !kayitlar.length) { gizle(); return; }
     let o;
-    try { o = aktifEkran.ozet(kayitlar); } catch (_) { kap.style.display = 'none'; return; }
-    if (!o || !o.satirlar || !o.satirlar.length) { kap.style.display = 'none'; return; }
+    try { o = aktifEkran.ozet(kayitlar); } catch (_) { gizle(); return; }
+    if (!o || !o.satirlar || !o.satirlar.length) { gizle(); return; }
 
     const para = function (n) {
       try { return Number(n || 0).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -1453,32 +1576,54 @@ const Arayuz = (function () {
   }
 
   /* --------------------------------------------------------- filtre yükleme */
+  /*
+   * Bu da bir GİB istek akışıdır (yıl taraması ~11 istek) ve bu yüzden meşgul
+   * kilidine DAHİLDİR. Kilitsizken paneli kapat/aç yapmak ikinci bir tarama
+   * başlatıyor, Durdur düğmesi görünmüyor ve nezaket penceresi başına birden
+   * fazla istek gidiyordu — servis istek limitine giden en kısa yol.
+   */
   async function filtreleriYukle() {
     if (!aktifEkran.filtreleriYukle || filtrelerYuklendi) return;
-    try {
-      Istemci.sifirla();
-      durum('Filtreler yükleniyor…', 5);
-      const f = await aktifEkran.filtreleriYukle(secimAl(), durum);
-      uygulaSecenekler(f);
-      filtrelerYuklendi = true;
-      el('ilerlemeKutu').style.display = 'none';
-      kimlikGoster();
-    } catch (e) {
-      el('ilerlemeKutu').style.display = 'none';
-      kayitEkle('uyari', 'Filtreler yüklenemedi (sorgu yine de çalışır): ' +
-        (e && e.message ? e.message : e));
-    }
+    if (filtreYukleniyor) return filtreYukleniyor;   // uçuştaki yükleme yeter
+    if (calisiyor) return;                            // başka bir işlem sürüyor
+
+    const benim = calismaNo;
+    mesgul(true);
+
+    filtreYukleniyor = (async function () {
+      try {
+        Istemci.sifirla();
+        durum('Filtreler yükleniyor…', 5);
+        const f = await aktifEkran.filtreleriYukle(secimAl(), durum);
+        if (benim !== calismaNo) return;
+        uygulaSecenekler(f);
+        filtrelerYuklendi = true;
+        el('ilerlemeKutu').style.display = 'none';
+        kimlikGoster();
+      } catch (e) {
+        if (benim !== calismaNo) return;
+        el('ilerlemeKutu').style.display = 'none';
+        kayitEkle('uyari', 'Filtreler yüklenemedi (sorgu yine de çalışır): ' +
+          (e && e.message ? e.message : e));
+      } finally {
+        // Eskimiş akış yeni durumu ezmesin.
+        if (benim === calismaNo) { filtreYukleniyor = null; mesgul(false); }
+      }
+    })();
+
+    return filtreYukleniyor;
   }
 
   /* ---------------------------------------------------------------- akışlar */
   async function calistir() {
     if (calisiyor) return;
+    const benim = ++calismaNo;
     mesgul(true);
     Istemci.sifirla();
-    araHepsiniKapat();
+    araHepsiniKapatSessiz();
     el('ilerlemeKutu').style.display = 'block';
     el('cubuk').style.width = '0';
-    el('ozet').style.display = 'none';
+    ozetGoster(null);
 
     const secim = secimAl();
     const kimlik = aktifEkran.mukellefBul ? aktifEkran.mukellefBul() : { ad: '', kimlik: '' };
@@ -1490,6 +1635,7 @@ const Arayuz = (function () {
     try {
       kayitEkle('bilgi', '── Sorgu başladı ──');
       await aktifEkran.topla(secim, durum, toplananlar);
+      if (benim !== calismaNo) return;   // panel bu arada sıfırlandı
 
       if (!toplananlar.length) {
         kayitEkle('uyari', 'Seçilen ölçütlerde kayıt bulunamadı.');
@@ -1500,6 +1646,9 @@ const Arayuz = (function () {
       aktar(toplananlar, baglam);
       bekleyen.tamam = true;   // kayıtlar PDF indirme için elde kalır
     } catch (e) {
+      /* Sıfırlama sonrası ekrana YAZILMAZ: yoksa iptal edilen sorgunun özeti
+         (önceki mükellefin rakamları) yeni mükellefin panelinde belirir. */
+      if (benim !== calismaNo) return;
       const kismi = toplananlar.length;
       if (e && e.iptal) {
         kayitEkle('uyari', 'Durduruldu.' + (kismi ? ' ' + kismi + ' alındı korundu.' : ''));
@@ -1510,7 +1659,7 @@ const Arayuz = (function () {
       }
       ozetGoster(toplananlar);
     } finally {
-      mesgul(false);
+      if (benim === calismaNo) mesgul(false);
     }
   }
 
@@ -1655,6 +1804,7 @@ const Arayuz = (function () {
     el('pill').classList.add('gizli');
     if (!el('izgara').children.length) alanlariCiz();
     kimlikGoster();
+    ozetGoster(bekleyen.kayitlar);   // boş sonuçta gizler; eski özet açılışta kalmasın
     kismiGoster();
     filtreleriYukle();
   }
@@ -1672,15 +1822,22 @@ const Arayuz = (function () {
   function sifirla(sebep) {
     if (!golge) return;
     Istemci.iptalEt();
+    /* Jetonu ilerlet: uçuştaki sorgu/filtre yüklemesi bittiğinde ekrana
+       dokunmasın. Meşgul durumu burada elle çözülür, çünkü o akışların
+       finally'si artık bilerek atlanıyor. */
+    calismaNo++;
+    filtreYukleniyor = null;
+    secimSifirlandi = '';
     bekleyen = { kayitlar: [], baglam: null, tamam: false };
     filtrelerYuklendi = false;
     uyariSayisi = 0;
+    mesgul(false);
     Object.keys(ara).forEach(function (k) { delete ara[k]; });
     el('izgara').innerHTML = '';
     el('kayit').innerHTML = '';
     el('kayit').classList.add('gizli');
     el('btnAyrinti').textContent = 'Ayrıntı';
-    el('ozet').style.display = 'none';
+    ozetGoster(null);
     el('ilerlemeKutu').style.display = 'none';
     el('cubuk').style.width = '0';
     el('durum').textContent = '';
@@ -1694,6 +1851,18 @@ const Arayuz = (function () {
     ekranlar = liste;
     aktifEkran = liste[0];
     if (document.getElementById(KOK_ID)) return;
+
+    /* Panel YENİDEN kuruluyor olabilir (SPA gövdeyi silmiş olabilir). Modül
+       düzeyindeki durum eski panele aitti; koşulsuz sıfırlanır, yoksa önceki
+       mükellefin kayıtları ve "Toplananları Aktar" düğmesi yeni panelde kalır. */
+    calismaNo++;
+    calisiyor = false;
+    filtreYukleniyor = null;
+    filtrelerYuklendi = false;
+    secimSifirlandi = '';
+    uyariSayisi = 0;
+    bekleyen = { kayitlar: [], baglam: null, tamam: false };
+    Object.keys(ara).forEach(function (k) { delete ara[k]; });
 
     const kok = document.createElement('div');
     kok.id = KOK_ID;
@@ -1714,11 +1883,13 @@ const Arayuz = (function () {
     if (sec) {
       sec.onchange = function () {
         aktifEkran = ekranlar[Number(sec.value)] || ekranlar[0];
+        calismaNo++;                 // önceki ekranın uçuştaki akışı ekrana yazmasın
+        filtreYukleniyor = null;
         bekleyen = { kayitlar: [], baglam: null, tamam: false };
         filtrelerYuklendi = false;
         Object.keys(ara).forEach(function (k) { delete ara[k]; });
         alanlariCiz();
-        el('ozet').style.display = 'none';
+        ozetGoster(null);
         kismiGoster();
         filtreleriYukle();
       };
@@ -1733,8 +1904,10 @@ const Arayuz = (function () {
         const kap = el('ara-' + k);
         if (!kap) return;
         if (yol.indexOf(kap) !== -1 || kap.contains(e.target)) return;
-        const p = el('araPop-' + k);
-        if (p) p.classList.add('gizli');
+        // araKapat kullanılır (sınıf eklemek yerine): seçim değiştiyse
+        // "degisince" kancası çalışsın, aksi hâlde vergi türü/dairesi
+        // listeleri eski yıla ait kalıyor.
+        araKapat(k);
       });
     });
     surukleBagla(kok);
@@ -1765,8 +1938,13 @@ const Arayuz = (function () {
 
 const Ekran = (function () {
 
-  const YIL_ONBELLEK = 'gibTahsilatExcel.yillar.v2.';
+  const YIL_ONBELLEK = 'gibTahsilatExcel.yillar.v3.';
   const GERIYE_YIL = 10;   // GİB penceresi ~10 yıl
+  /* Önbellek bu süreden eskiyse yeniden taranır. Yıl listesi yıl içinde de
+     değişebilir (mükellef o yıl ilk ödemesini yapar), sonsuza kadar güvenilmez. */
+  const ONBELLEK_OMRU_MS = 12 * 60 * 60 * 1000;
+  /* Tarayıcıda sınırsız mükellef önbelleği birikmesin. */
+  const EN_FAZLA_ONBELLEK = 25;
 
   /* GİB yeni alan eklerse Excel'e ham adıyla ek sütun düşsün diye bilinenler listesi */
   const ALINDI_BILINEN = ['alindiNo', 'secureId', 'islemTarihi', 'toplamOdenen',
@@ -1833,16 +2011,109 @@ const Ekran = (function () {
     return l;
   }
 
+  /*
+   * Önbellek anahtarında HAM VKN/TCKN tutulmaz: amaç yalnızca mükellefleri
+   * birbirinden ayırmak; müşterilerin kimlik numaraları tarayıcıda aylarca
+   * listelenebilir hâlde birikmesin. Kısa, geri döndürülemez bir özet yeter.
+   */
+  function kimlikOzeti(s) {
+    let h1 = 0x811c9dc5, h2 = 0x01000193;
+    for (let i = 0; i < s.length; i++) {
+      h1 = ((h1 ^ s.charCodeAt(i)) >>> 0) * 0x01000193 >>> 0;
+      h2 = (h2 + s.charCodeAt(i) * (i + 1)) >>> 0;
+    }
+    return h1.toString(36) + h2.toString(36);
+  }
+
   function yilAnahtari() {
-    return YIL_ONBELLEK + (mukellefBul().kimlik || 'genel');
+    const k = mukellefBul().kimlik;
+    return YIL_ONBELLEK + (k ? kimlikOzeti(k) : 'genel');
+  }
+
+  /* Ham kimlik içeren eski sürüm anahtarları temizlenir (bir kez, açılışta). */
+  function eskiAnahtarlariTemizle() {
+    try {
+      const sil = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && /^gibTahsilatExcel\.yillar\.v[12]\./.test(k)) sil.push(k);
+      }
+      sil.forEach(function (k) { localStorage.removeItem(k); });
+    } catch (_) {}
+  }
+
+  /* En eski kayıtları atarak önbelleği sınırlar. */
+  function onbellegiBuda() {
+    try {
+      const girisler = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k || k.indexOf(YIL_ONBELLEK) !== 0) continue;
+        let z = 0;
+        try { z = Number((JSON.parse(localStorage.getItem(k)) || {}).zaman) || 0; } catch (_) {}
+        girisler.push({ k: k, z: z });
+      }
+      if (girisler.length <= EN_FAZLA_ONBELLEK) return;
+      girisler.sort(function (a, b) { return a.z - b.z; });
+      for (let i = 0; i < girisler.length - EN_FAZLA_ONBELLEK; i++) {
+        localStorage.removeItem(girisler[i].k);
+      }
+    } catch (_) {}
+  }
+
+  eskiAnahtarlariTemizle();
+
+  /*
+   * Oturum belleği: taraması yarım kalan (güvenilmez) yıl listesi kalıcı
+   * önbelleğe YAZILMAZ ama o oturumda kullanılabilsin diye burada tutulur.
+   * Mükellef değişince kendiliğinden geçersizleşsin diye kimlikle birlikte saklanır.
+   */
+  let oturumYillari = { kimlik: null, yillar: null };
+
+  function oturumaYaz(yillar) {
+    oturumYillari = { kimlik: mukellefBul().kimlik || 'genel', yillar: yillar.slice() };
+  }
+
+  function onbellekOku() {
+    try {
+      const c = JSON.parse(localStorage.getItem(yilAnahtari()) || 'null');
+      if (c && Array.isArray(c.yillar) && c.yillar.length) return c;
+    } catch (_) {}
+    return null;
+  }
+
+  function onbellekYaz(yillar) {
+    oturumaYaz(yillar);
+    try {
+      localStorage.setItem(yilAnahtari(),
+        JSON.stringify({ yillar: yillar, zaman: Date.now(), tam: true }));
+      onbellegiBuda();
+    } catch (_) {}
+  }
+
+  function onbellekSil() {
+    try { localStorage.removeItem(yilAnahtari()); } catch (_) {}
+    oturumYillari = { kimlik: null, yillar: null };
+  }
+
+  /*
+   * Önbellek hâlâ güvenilir mi? Yalnızca TAM biten bir tarama ve makul yaş
+   * kabul edilir. Aksi hâlde koca bir yıl (örn. yılbaşından sonra cari yıl)
+   * listede hiç görünmeden Excel'in dışında kalır — sessiz ve en tehlikeli hata.
+   */
+  function onbellekTaze(c) {
+    if (!c || c.tam !== true) return false;
+    const z = Number(c.zaman) || 0;
+    return z > 0 && (Date.now() - z) < ONBELLEK_OMRU_MS;
   }
 
   function onbellektenYillar() {
-    try {
-      const c = JSON.parse(localStorage.getItem(yilAnahtari()) || 'null');
-      if (Array.isArray(c) && c.length) return c;
-    } catch (_) {}
-    return null;
+    const kimlik = mukellefBul().kimlik || 'genel';
+    if (oturumYillari.kimlik === kimlik && oturumYillari.yillar && oturumYillari.yillar.length) {
+      return oturumYillari.yillar.slice();
+    }
+    const c = onbellekOku();
+    return c ? c.yillar.slice() : null;
   }
 
   /* Panel açılır açılmaz dolu olsun diye: önbellek varsa o, yoksa tam aralık. */
@@ -1878,13 +2149,53 @@ const Ekran = (function () {
     return Yard.metin(v).replace(/[\s\-.]/g, '').toUpperCase();
   }
 
+  /*
+   * Detay satırındaki vergi dönemini karşılaştırılabilir aralığa çevirir.
+   *   "2026/04-2026/04" -> { bas:"202604", bit:"202604" }
+   *   "2026/01"         -> { bas:"202601", bit:"202601" }
+   * Anlaşılamazsa null döner; çağıran satırı ELEMEZ (bilinmeyen veri sessizce
+   * atılmamalı), yalnızca sayar ve kullanıcıyı uyarır.
+   */
+  function donemAralik(v) {
+    const s = Yard.metin(v).trim();
+    if (!s) return null;
+
+    const coz = function (p) {
+      const m = String(p).trim().match(/^(\d{4})\s*[\/.\-]\s*(\d{1,2})$/);
+      if (m) return m[1] + String(parseInt(m[2], 10)).padStart(2, '0');
+      const m2 = String(p).trim().match(/^(\d{4})(\d{2})$/);
+      return m2 ? (m2[1] + m2[2]) : null;
+    };
+
+    // "2026/04-2026/04" -> son tireden böl (yıl/ay içinde de tire olabilir)
+    let bas = null, bit = null;
+    const i = s.lastIndexOf('-');
+    if (i > 0) {
+      bas = coz(s.slice(0, i));
+      bit = coz(s.slice(i + 1));
+    }
+    if (!bas || !bit) { bas = bit = coz(s); }
+    if (!bas || !bit) return null;
+    return (bas <= bit) ? { bas: bas, bit: bit } : { bas: bit, bit: bas };
+  }
+
+  /*
+   * Yılları tarar. Dönüş: { yillar, tam }
+   *
+   * `tam` YALNIZCA tarama düzgün bittiğinde true olur. Yarım kalan bir tarama
+   * "tam" sayılıp kalıcı önbelleğe yazılırsa, eksik yıllar bir daha hiç
+   * sorgulanmaz ve o yılların tahsilatları kalıcı olarak görünmez olur.
+   *
+   * GİB desteklemediği yıllara HTTP 400 döner; iki ardışık 400 taramanın
+   * NORMAL sonudur (tam sayılır). Başka bir hata ise liste eksik demektir.
+   */
   async function yillariTara(ilerleme) {
     await Kanca.hazirBekle(20000);
     const su = new Date().getFullYear();
     const enEski = su - GERIYE_YIL;
     const toplamAdim = su - enEski + 1;
     const bulunan = [];
-    let ardArdaHata = 0;
+    let ardArda = 0, ardArda400 = 0, tam = true;
 
     for (let y = su; y >= enEski; y--) {
       Istemci.iptalKontrol();
@@ -1895,32 +2206,74 @@ const Ekran = (function () {
       try {
         const v = await Istemci.istek('alindi-sorgula', listeGovdesi(y, null, '', '')(1, 1), 1);
         const toplam = Number(((v || {}).pageDetail || {}).total) || 0;
-        ardArdaHata = 0;
+        ardArda = 0; ardArda400 = 0;
         if (toplam > 0) bulunan.push(String(y));
       } catch (e) {
         if (e && e.iptal) throw e;
         if (e && e.limit) {
-          Yard.bildir('uyari', 'İstek limiti nedeniyle yıl taraması yarıda kesildi; ' +
-            'bulunanlar kullanılacak. "↻ Yılları yenile" ile sonra tamamlayabilirsiniz.');
+          Yard.bildir('uyari', 'İstek limiti nedeniyle yıl taraması yarıda kesildi. ' +
+            'Liste EKSİK olabilir; birkaç dakika sonra "↻ Yılları yenile" ile tamamlayın.');
+          tam = false;
           break;
         }
-        // GİB desteklemediği yıllara HTTP 400 döner; iki kez üst üste olursa dur.
-        if (++ardArdaHata >= 2) break;
+        ardArda++;
+        if (e && e.durum === 400) ardArda400++;
+        if (ardArda >= 2) {
+          if (ardArda400 < ardArda) {
+            tam = false;
+            Yard.bildir('uyari', 'Yıl taraması hata nedeniyle yarıda kesildi (' +
+              (e && e.message ? e.message : e) + '). Liste EKSİK olabilir.');
+          }
+          break;
+        }
       }
     }
-    return bulunan;
+    return { yillar: bulunan, tam: tam };
+  }
+
+  /*
+   * Cari yıl listede yoksa TEK istekle denetlenir. Yılbaşından sonra ya da
+   * mükellef o yıl ilk ödemesini yaptığında koca bir yılın sessizce kaybolmasını
+   * engelleyen ucuz emniyet: tam tarama yerine 1 istek.
+   */
+  async function cariYiliDogrula(yillar) {
+    const su = String(new Date().getFullYear());
+    if (yillar.indexOf(su) !== -1) return yillar;
+    try {
+      const v = await Istemci.istek('alindi-sorgula', listeGovdesi(su, null, '', '')(1, 1), 1);
+      if ((Number(((v || {}).pageDetail || {}).total) || 0) > 0) {
+        Yard.bildir('bilgi', su + ' yılında kayıt bulundu, yıl listesine eklendi.');
+        return [su].concat(yillar);
+      }
+    } catch (e) {
+      if (e && e.iptal) throw e;
+      Yard.bildir('uyari', su + ' yılı denetlenemedi: ' + (e && e.message ? e.message : e));
+    }
+    return yillar;
   }
 
   async function yillariYenile(ilerleme) {
-    const yillar = await yillariTara(ilerleme);
-    try {
-      if (yillar.length) localStorage.setItem(yilAnahtari(), JSON.stringify(yillar));
-      else localStorage.removeItem(yilAnahtari());
-    } catch (_) {}
-    Yard.bildir('basari', yillar.length
-      ? ('Kaydı olan yıllar: ' + yillar.join(', '))
-      : 'Hiçbir yılda kayıt bulunamadı.');
-    return { yillar: yillar.length ? yillar : tumYilAraligi() };
+    const t = await yillariTara(ilerleme);
+    const yillar = t.yillar;
+
+    if (yillar.length && t.tam) {
+      onbellekYaz(yillar);
+      Yard.bildir('basari', 'Kaydı olan yıllar: ' + yillar.join(', '));
+    } else if (yillar.length) {
+      // Eksik liste kalıcılaşmasın: yalnızca bu oturumda kullanılır.
+      oturumaYaz(yillar);
+      Yard.bildir('uyari', 'Bulunanlar: ' + yillar.join(', ') +
+        ' — tarama tamamlanamadığı için kalıcı olarak kaydedilmedi.');
+    } else if (t.tam) {
+      onbellekSil();
+      Yard.bildir('bilgi', 'Hiçbir yılda kayıt bulunamadı.');
+    } else {
+      // Boş sonuç önbelleği SİLMEZ: limit/hata yüzünden boş dönmüş olabilir.
+      Yard.bildir('uyari', 'Tarama tamamlanamadığı için sonuç güvenilir değil; ' +
+        'önceki yıl listesi korundu.');
+    }
+
+    return { yillar: yillar.length ? yillar : (onbellektenYillar() || tumYilAraligi()) };
   }
 
   /* ---------------------------------------------------------------- sütunlar */
@@ -1948,8 +2301,12 @@ const Ekran = (function () {
   ];
 
   const ALANLAR = [
+    /* bosBirakma: seçili yıl yeni listede yoksa seçim BOŞA düşmesin — boş,
+       "tüm yıllar" demektir ve kullanıcı istemeden onlarca dakikalık bir
+       tarama başlatmış olur. Bunun yerine listenin ilk (en yeni) yılına döner. */
     { anahtar: 'yil', etiket: 'Ödeme Yılı', aciklama: 'çoklu seçim için Ctrl',
       tur: 'ara', coklu: true, genis: true, bosAd: '*** TÜM YILLAR ***',
+      bosBirakma: true,
       secenekler: yilSecenekleri,
       varsayilan: function () {
         const l = onbellektenYillar();
@@ -2051,12 +2408,26 @@ const Ekran = (function () {
   async function filtreleriYukle(secim, ilerleme) {
     await Kanca.hazirBekle(20000);
 
-    let yillar = onbellektenYillar();
-    if (!yillar) {
-      yillar = await yillariTara(ilerleme);
-      try {
-        if (yillar.length) localStorage.setItem(yilAnahtari(), JSON.stringify(yillar));
-      } catch (_) {}
+    const onbellek = onbellekOku();
+    let yillar;
+
+    if (onbellekTaze(onbellek)) {
+      // Taze önbellek: tam tarama yerine yalnızca cari yıl denetlenir.
+      yillar = await cariYiliDogrula(onbellek.yillar.slice());
+      if (yillar.length !== onbellek.yillar.length) onbellekYaz(yillar);
+      else oturumaYaz(yillar);
+    } else {
+      const t = await yillariTara(ilerleme);
+      yillar = t.yillar;
+      if (yillar.length && t.tam) {
+        onbellekYaz(yillar);
+      } else if (yillar.length) {
+        oturumaYaz(yillar);
+      } else if (onbellek && onbellek.yillar.length && !t.tam) {
+        // Tarama boş döndü ama tamamlanmadı: eski listeyi silmek yerine koru.
+        yillar = onbellek.yillar.slice();
+        Yard.bildir('uyari', 'Yıl taraması tamamlanamadı; önceki liste kullanılıyor.');
+      }
       if (yillar.length) Yard.bildir('bilgi', 'Kaydı olan yıllar: ' + yillar.join(', '));
     }
 
@@ -2074,9 +2445,11 @@ const Ekran = (function () {
    * Bulunan kayıtlar doğrudan `toplananlar` dizisine eklenir; böylece işlem
    * yarıda kesilse (Durdur) veya hata alsa bile o ana kadarki veri panelde kalır.
    *
-   * Vergi türü ve plaka süzgeci SATIR bazında uygulanır: bir alındıda hem MTV hem
-   * KDV satırı varsa ve MTV seçilmişse yalnızca MTV satırları gelir. (Sunucunun
-   * kendi vergiTuru süzgeci alındıyı bütün olarak seçtiği için tek başına yetmez.)
+   * SÜZGEÇLERİN TAMAMI SATIR BAZINDA UYGULANIR. Sunucunun süzgeci ALINDI
+   * düzeyindedir: bir alındıda ölçüte uyan tek bir satır varsa alındının
+   * TAMAMINI döndürür ve detay isteğinde süzgeç parametresi yoktur. Yani
+   * yalnızca sunucuya güvenirsek dönem/daire/tür dışı satırlar Excel'e girer
+   * ve tutar toplamı sessizce şişer. Bu yüzden burada tekrar süzülür.
    */
   async function topla(secim, ilerleme, toplananlar) {
     await Kanca.hazirBekle(20000);
@@ -2090,16 +2463,23 @@ const Ekran = (function () {
     if (donemBit === null) {
       throw new Error('Vergi dönemi bitişi anlaşılamadı. AA.YYYY yazın (örn. 12.2026).');
     }
+    if (donemBas && donemBit && donemBas > donemBit) {
+      throw new Error('Vergi dönemi başlangıcı bitişten sonra olamaz (' +
+        Yard.aydanMetne(donemBas) + ' > ' + Yard.aydanMetne(donemBit) + ').');
+    }
 
     const turler = (Array.isArray(secim.vergiTuru) ? secim.vergiTuru
       : (secim.vergiTuru ? [secim.vergiTuru] : [])).filter(Boolean);
     const plaka = plakaSadelestir(secim.plaka);
-    const suzgecVar = turler.length > 0 || !!plaka;
+    const vdKodu = Yard.metin(secim.vdKodu).trim();
+    const donemSuz = !!(donemBas || donemBit);
+    const suzgecVar = turler.length > 0 || !!plaka || !!vdKodu || donemSuz;
     // Tek tür seçiliyse sunucuya da bildir: gereksiz alındı çekilmesin.
-    const sunucuSecim = { vdKodu: secim.vdKodu, vergiTuru: turler.length === 1 ? turler[0] : '' };
+    const sunucuSecim = { vdKodu: vdKodu, vergiTuru: turler.length === 1 ? turler[0] : '' };
 
     let hataSayisi = 0;
     let elenen = 0;
+    let cozulemeyen = 0;
 
     for (let yi = 0; yi < yillar.length; yi++) {
       const yil = yillar[yi];
@@ -2139,6 +2519,23 @@ const Ekran = (function () {
                 if (turler.indexOf(kod) === -1) return false;
               }
               if (plaka && plakaSadelestir(d.plakaNo).indexOf(plaka) === -1) return false;
+
+              if (vdKodu) {
+                const oid = Yard.metin(d.orgOid).trim();
+                if (oid) { if (oid !== vdKodu) return false; }
+                else cozulemeyen++;   // daire kodu yok: eleyemeyiz, satır kalır
+              }
+
+              if (donemSuz) {
+                const ar = donemAralik(d.vergiDonem);
+                if (ar) {
+                  // Kesişim yoksa satır aralık dışıdır.
+                  if (donemBit && ar.bas > donemBit) return false;
+                  if (donemBas && ar.bit < donemBas) return false;
+                } else {
+                  cozulemeyen++;      // dönem okunamadı: eleyemeyiz, satır kalır
+                }
+              }
               return true;
             });
             if (!detaylar.length) { elenen++; continue; }  // süzgece uymayan alındı yazılmaz
@@ -2153,6 +2550,10 @@ const Ekran = (function () {
     }
 
     if (elenen) Yard.bildir('bilgi', elenen + ' alındı süzgece uymadığı için alınmadı.');
+    if (cozulemeyen) {
+      Yard.bildir('uyari', cozulemeyen + ' satırın vergi dönemi/dairesi okunamadı; ' +
+        'süzgeç dışı bırakılmayıp Excel\'e alındı (veri kaybı olmasın diye).');
+    }
     if (hataSayisi) {
       Yard.bildir('uyari', hataSayisi + ' alındının detayı alınamadı. ' +
         'Bu satırlar Excel\'de "Not" sütununda işaretlendi.');
@@ -2487,8 +2888,16 @@ const Ekran = (function () {
   function kontrol() {
     try {
       if (!Arayuz.varMi()) {
+        // Panel SPA tarafından silinip yeniden kuruluyor olabilir. Bu arada
+        // mükellef değişmişse sessizce yutulmamalı: kullanıcı bilgilendirilir.
+        // (Arayuz.kur() modül durumunu zaten koşulsuz sıfırlar.)
         Arayuz.kur(EKRANLAR);
-        sonKimlik = kimlik();
+        const yeni = kimlik();
+        if (sonKimlik !== null && yeni !== sonKimlik) {
+          Arayuz.sifirla(yeni ? 'Mükellef değişti — panel sıfırlandı.'
+                              : 'Oturum kapandı — panel sıfırlandı.');
+        }
+        sonKimlik = yeni;
         return;
       }
       const k = kimlik();

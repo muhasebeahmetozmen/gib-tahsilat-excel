@@ -96,5 +96,9 @@ biçimindedir (Excel bilimsel gösterime çevirmez, baştaki sıfırları silmez
 - Yalnızca sizin ekranınızda **zaten görebildiğiniz** veriler, tek tek tıklamak yerine
   otomatik toplanır.
 - Sunucuya saygılı çalışır: istekler sıralı ve aralıklı atılır, sınır uyarısı gelirse durur.
+- Tarayıcıda kalıcı olarak **yalnızca tek şey** tutulur: hangi yıllarda kaydınız
+  olduğunun listesi (her sorguda 11 istek atmamak için). Bu kayıtta kimlik numarası
+  **açık hâlde yazılmaz**, en fazla 25 mükellef tutulur ve 12 saatte bir tazelenir.
+  Silmek isterseniz tarayıcı geçmişinden site verilerini temizlemeniz yeterli.
 - Resmî bir GİB ürünü değildir.
 - İndirdiğiniz Excel ve zip dosyaları vergi verisi içerir; paylaşırken dikkat edin.
