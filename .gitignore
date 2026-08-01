@@ -1,0 +1,15 @@
+# ============================================================================
+# Bu depo YALNIZCA kurulum dosyasini yayinlar.
+# Kaynak kod, testler ve calisma belgeleri YEREL kalir; depoya asla girmez.
+#
+# Yontem: once her sey yok sayilir, sonra yalnizca yayinlanacaklar geri alinir.
+# Boylece yanlislikla "git add -A" yapilsa bile kaynak kod disari cikamaz.
+# ============================================================================
+/*
+
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/dist/
+/dist/*
+!/dist/gib-tahsilat-excel.user.js

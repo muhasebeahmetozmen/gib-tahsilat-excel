@@ -1,0 +1,7 @@
+# Satır sonlarını her makinede aynı tut: depoda daima LF.
+# Böylece Windows/Mac/Linux arasında sahte değişiklik farkları oluşmaz.
+* text=auto eol=lf
+*.png binary
+*.xlsx binary
+*.zip binary
+*.pdf binary
