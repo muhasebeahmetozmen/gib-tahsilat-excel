@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GİB Tahsilat → Excel
 // @namespace    gib-tahsilat-excel
-// @version      1.0.17
+// @version      1.0.18
 // @description  Dijital Vergi Dairesi "Ödeme Alındılarım ve Tahsilat Bilgilerim" ekranındaki tahsilatları DETAYLARIYLA birlikte tek tıkla Excel'e aktarır. Tamamen ücretsiz, veriler bilgisayardan dışarı çıkmaz.
 // @updateURL    https://raw.githubusercontent.com/muhasebeahmetozmen/gib-tahsilat-excel/main/dist/gib-tahsilat-excel.user.js
 // @downloadURL  https://raw.githubusercontent.com/muhasebeahmetozmen/gib-tahsilat-excel/main/dist/gib-tahsilat-excel.user.js
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* Bu dosya build.py tarafindan uretildi. Elle duzenleme; src/ altini duzenle. */
-/* Surum: 1.0.17 */
+/* Surum: 1.0.18 */
 
 (function () {
 'use strict';
@@ -394,17 +394,64 @@ const Istemci = (function () {
   const GECIKME_MS = 600;
   const EN_FAZLA_SAYFA = 500;   // sonsuz döngüye karşı emniyet
 
-  /* Sunucu "servis istek limitine ulaşıldı" derse ısrar etmek durumu kötüleştirir:
-     hemen dur, elde olanı koru, kullanıcıya beklemesini söyle. */
-  const LIMIT_DESENI = /limit|kota|too\s*many|çok\s*fazla\s*istek|yoğunluk/i;
+  /*
+   * Sunucu istek sınırı uyarısı verirse ısrar etmek durumu kötüleştirir:
+   * hemen dur, elde olanı koru, kullanıcıya beklemesini söyle.
+   *
+   * DESEN DAR TUTULUR. Önceki hâli tek başına "limit" kelimesini yakalıyordu;
+   * vergi bağlamında bu kelime masumca çok geçer ("limitli mükellefiyet",
+   * "kredi limiti"…) ve script kendi kendini durdurabilir. Artık yalnızca
+   * ISTEK sınırını anlatan kalıplar sayılır.
+   */
+  const LIMIT_DESENI =
+    /(istek|sorgu|servis|talep)\s*(sayısı|adedi)?\s*(limit|sınır)|limit(in|ine|ini)?\s*(ulaş|aşıl|doldu)|kota\s*(doldu|aşıl)|too\s*many\s*requests|rate\s*limit|çok\s*fazla\s*istek|aşırı\s*yoğunluk/i;
 
-  function limitHatasi(ayrinti) {
+  /*
+   * Hata metni artık GİB'in KENDİ sözlerini gösterir. Eskiden uydurduğumuz
+   * cümle GİB'in mesajı sanılıyordu; kullanıcı "limit aldım" dediğinde
+   * elimizde gerçek kanıt kalmıyordu.
+   */
+  function limitHatasi(ayrinti, bekleSn) {
     const e = new Error(
-      'GİB servis istek limitine ulaşıldı' + (ayrinti ? ' (' + ayrinti + ')' : '') +
-      '. Birkaç dakika bekleyip tekrar deneyin; o ana kadar toplananlar korundu.'
+      'Sunucu isteği reddetti' + (ayrinti ? ' — GİB\'in yanıtı: ' + ayrinti : '') + '. ' +
+      (bekleSn ? ('Sunucu ' + bekleSn + ' saniye beklenmesini istiyor. ')
+               : 'Birkaç dakika bekleyip tekrar deneyin. ') +
+      'O ana kadar toplananlar korundu.'
     );
     e.limit = true;
+    if (bekleSn) e.bekleSn = bekleSn;
     return e;
+  }
+
+  /*
+   * Limit anında elimizde kanıt kalsın: hangi başlıklar geldi, sunucu ne dedi.
+   * Bugüne kadar kullanıcı "limit aldım" dediğinde teşhis edecek hiçbir şey yoktu.
+   */
+  function teshisYaz(yanit, etiket) {
+    try {
+      const ilginc = ['retry-after', 'x-ratelimit-limit', 'x-ratelimit-remaining',
+                      'x-ratelimit-reset', 'ratelimit-reset', 'x-rate-limit-reset'];
+      const parcalar = [];
+      ilginc.forEach(function (a) {
+        const v = yanit.headers.get(a);
+        if (v) parcalar.push(a + '=' + v);
+      });
+      Yard.bildir('bilgi', 'Teşhis [' + etiket + '] durum=' + yanit.status +
+        (parcalar.length ? ' · ' + parcalar.join(' · ') : ' · sınır başlığı yok'));
+    } catch (_) {}
+  }
+
+  /* Sunucunun standart "Retry-After" başlığı: saniye ya da HTTP tarihi olabilir. */
+  function bekleSuresi(yanit) {
+    try {
+      const h = yanit.headers.get('Retry-After');
+      if (!h) return 0;
+      const n = Number(h);
+      if (isFinite(n) && n > 0) return Math.min(600, Math.round(n));
+      const t = Date.parse(h);
+      if (isFinite(t)) return Math.min(600, Math.max(0, Math.round((t - Date.now()) / 1000)));
+    } catch (_) {}
+    return 0;
   }
 
   let iptalIstendi = false;
@@ -482,13 +529,18 @@ const Istemci = (function () {
       }
 
       if (yanit.status === 429) {
-        /* Bir kez, uzun bekleyerek denenir; ısrar edilmez.
+        /* Sunucu ne kadar beklenmesini istiyorsa O KADAR beklenir; 5 saniye
+           sonra vurmak hem kaba hem faydasız (boşa istek).
            `deneme >= denemeler` şartı ŞART: denemeler=1 ile çağrıldığında
            aksi hâlde döngü return'süz biter, fonksiyon undefined döner ve
            .limit bayrağı kaybolur — panel "kayıt yok" sanır. */
-        if (deneme >= 2 || deneme >= denemeler) throw limitHatasi('HTTP 429');
-        Yard.bildir('uyari', 'Sunucu istek sınırı uyarısı verdi, 5 saniye beklenip bir kez denenecek…');
-        await Yard.bekle(5000);
+        const bekle = bekleSuresi(yanit);
+        teshisYaz(yanit, 'HTTP 429');
+        if (deneme >= 2 || deneme >= denemeler) throw limitHatasi('HTTP 429', bekle);
+        const sn = bekle || 5;
+        Yard.bildir('uyari', 'Sunucu istek sınırı uyarısı verdi, ' + sn +
+          ' saniye beklenip bir kez denenecek…');
+        await Yard.bekle(sn * 1000);
         continue;
       }
 
@@ -538,7 +590,10 @@ const Istemci = (function () {
         e.oturum = true;
         throw e;
       }
-      if (yanit.status === 429) throw limitHatasi('HTTP 429');
+      if (yanit.status === 429) {
+        teshisYaz(yanit, 'HTTP 429 (PDF)');
+        throw limitHatasi('HTTP 429', bekleSuresi(yanit));
+      }
       if (yanit.status >= 500) {
         if (deneme >= denemeler) throw new Error('Sunucu yanıt vermiyor (HTTP ' + yanit.status + ').');
         await Yard.bekle(1500 * deneme);
@@ -1943,8 +1998,11 @@ const Ekran = (function () {
   /* Önbellek bu süreden eskiyse yeniden taranır. Yıl listesi yıl içinde de
      değişebilir (mükellef o yıl ilk ödemesini yapar), sonsuza kadar güvenilmez. */
   const ONBELLEK_OMRU_MS = 12 * 60 * 60 * 1000;
-  /* Tarayıcıda sınırsız mükellef önbelleği birikmesin. */
-  const EN_FAZLA_ONBELLEK = 25;
+  /* Tarayıcıda sınırsız mükellef önbelleği birikmesin.
+     25 çok düşüktü: 25'ten fazla müşterisi olan bir müşavirde önbellek sürekli
+     deviriliyor ve her devrilme bir sonraki ziyarette 11 istek demek oluyordu.
+     Kayıt başına ~120 bayt; saklanan şey özetlenmiş kimlik + yıl listesi. */
+  const EN_FAZLA_ONBELLEK = 200;
 
   /* GİB yeni alan eklerse Excel'e ham adıyla ek sütun düşsün diye bilinenler listesi */
   const ALINDI_BILINEN = ['alindiNo', 'secureId', 'islemTarihi', 'toplamOdenen',
@@ -2207,6 +2265,10 @@ const Ekran = (function () {
         const v = await Istemci.istek('alindi-sorgula', listeGovdesi(y, null, '', '')(1, 1), 1);
         const toplam = Number(((v || {}).pageDetail || {}).total) || 0;
         ardArda = 0; ardArda400 = 0;
+        /* Bu yanıt vergi türü ve daire listelerini ZATEN içeriyor. Eskiden
+           çöpe atılıp hemen ardından aynı istek `listeleriAl` ile tekrar
+           atılıyordu. Şimdi doğrudan önbelleğe yazılıyor: bedava tasarruf. */
+        listeleriYaz(y, v);
         if (toplam > 0) bulunan.push(String(y));
       } catch (e) {
         if (e && e.iptal) throw e;
@@ -2360,23 +2422,74 @@ const Ekran = (function () {
    * olabilir. Bu yüzden seçilen yıl(lar)ın listeleri alınıp birleştirilir.
    * Aynı yıl ikinci kez sorulmasın diye sonuç bellekte tutulur (istek limiti).
    */
-  const turOnbellek = {};
+  let turOnbellek = {};
 
-  async function listeleriAl(yil) {
-    const anahtar = (mukellefBul().kimlik || '') + '|' + yil;
-    if (turOnbellek[anahtar]) return turOnbellek[anahtar];
+  /*
+   * Detay önbelleği — YALNIZCA BELLEKTE. Sekme kapanınca yok olur, diske
+   * YAZILMAZ; yeni bir gizlilik riski doğurmaz.
+   *
+   * Neden: geçmiş bir tahsilatın vergi satırları bir daha değişmez. Aynı
+   * oturumda süzgeci daraltıp tekrar sorguladığınızda bugün her şey baştan
+   * iniyordu — limitli bir ortamda saf israf.
+   *
+   * Anahtar mükellef kimliğini İÇERİR ve mükellef değişince önbellek tamamen
+   * silinir. `alindiNo` opak bir anahtar; iki mükellefte çakışmayacağının
+   * garantisi yok. Yanlış yapılırsa BAŞKA BİR MÜŞTERİNİN vergi satırları
+   * Excel'e girer — bir mali müşavir için olabilecek en kötü hata.
+   */
+  const EN_FAZLA_DETAY = 4000;
+  let detayOnbellek = {};
+  let detaySahibi = null;
+  let detaySayisi = 0;
 
-    const v = await Istemci.istek('alindi-sorgula', listeGovdesi(yil, null, '', '')(1, 1));
+  function detayOnbellegiHazirla() {
+    const kimlik = mukellefBul().kimlik || 'genel';
+    if (detaySahibi !== kimlik) {
+      detayOnbellek = {};
+      turOnbellek = {};
+      detaySayisi = 0;
+      detaySahibi = kimlik;
+    }
+    return kimlik;
+  }
+
+  function detayAnahtari(kimlik, yil, alindi) {
+    return kimlik + '|' + yil + '|' + Yard.metin((alindi || {}).alindiNo);
+  }
+
+  function detayOnbellegeKoy(anahtar, detaylar) {
+    if (detaySayisi >= EN_FAZLA_DETAY) return;   // bellek sınırsız büyümesin
+    detayOnbellek[anahtar] = detaylar.slice();
+    detaySayisi++;
+  }
+
+  function turAnahtari(yil) {
+    return (mukellefBul().kimlik || '') + '|' + yil;
+  }
+
+  /* Herhangi bir alindi-sorgula yanıtından tür/daire listelerini önbelleğe alır. */
+  function listeleriYaz(yil, v) {
+    if (!v) return null;
+    const turler = v.vergiTurleriList, daireler = v.vergiDairesiList;
+    if (!turler && !daireler) return null;
     const sonuc = {
-      vergiTurleri: ((v && v.vergiTurleriList) || []).map(function (x) {
+      vergiTurleri: (turler || []).map(function (x) {
         return { deger: x.vergiKodu, ad: x.vergiUzunAdi };
       }),
-      vergiDaireleri: ((v && v.vergiDairesiList) || []).map(function (x) {
+      vergiDaireleri: (daireler || []).map(function (x) {
         return { deger: x.orgOid, ad: x.vdAdi };
       })
     };
-    turOnbellek[anahtar] = sonuc;
+    turOnbellek[turAnahtari(yil)] = sonuc;
     return sonuc;
+  }
+
+  async function listeleriAl(yil) {
+    const anahtar = turAnahtari(yil);
+    if (turOnbellek[anahtar]) return turOnbellek[anahtar];
+
+    const v = await Istemci.istek('alindi-sorgula', listeGovdesi(yil, null, '', '')(1, 1));
+    return listeleriYaz(yil, v) || { vergiTurleri: [], vergiDaireleri: [] };
   }
 
   async function turleriYukle(secim, ilerleme) {
@@ -2477,9 +2590,11 @@ const Ekran = (function () {
     // Tek tür seçiliyse sunucuya da bildir: gereksiz alındı çekilmesin.
     const sunucuSecim = { vdKodu: vdKodu, vergiTuru: turler.length === 1 ? turler[0] : '' };
 
+    const kimlik = detayOnbellegiHazirla();
     let hataSayisi = 0;
     let elenen = 0;
     let cozulemeyen = 0;
+    let onbellekten = 0;
 
     for (let yi = 0; yi < yillar.length; yi++) {
       const yil = yillar[yi];
@@ -2500,15 +2615,23 @@ const Ekran = (function () {
 
         let detaylar = [];
         let hata = '';
-        try {
-          detaylar = await Istemci.tumSayfalar(
-            'odeme-sorgula', detayGovdesi(a, yil), { sayfaBoyutu: 100 });
-        } catch (e) {
-          // İptal, oturum ve istek limiti tüm işlemi durdurur; tekil hatalar durdurmaz.
-          if (e && (e.iptal || e.oturum || e.limit)) throw e;
-          hata = 'Detay alınamadı: ' + (e.message || e);
-          hataSayisi++;
-          Yard.bildir('uyari', (a.alindiNo || '?') + ' → ' + hata);
+        const dAnahtar = detayAnahtari(kimlik, yil, a);
+
+        if (Object.prototype.hasOwnProperty.call(detayOnbellek, dAnahtar)) {
+          detaylar = detayOnbellek[dAnahtar].slice();   // istek atılmadı
+          onbellekten++;
+        } else {
+          try {
+            detaylar = await Istemci.tumSayfalar(
+              'odeme-sorgula', detayGovdesi(a, yil), { sayfaBoyutu: 100 });
+            detayOnbellegeKoy(dAnahtar, detaylar);
+          } catch (e) {
+            // İptal, oturum ve istek limiti tüm işlemi durdurur; tekil hatalar durdurmaz.
+            if (e && (e.iptal || e.oturum || e.limit)) throw e;
+            hata = 'Detay alınamadı: ' + (e.message || e);
+            hataSayisi++;
+            Yard.bildir('uyari', (a.alindiNo || '?') + ' → ' + hata);
+          }
         }
 
         if (suzgecVar) {
@@ -2549,6 +2672,10 @@ const Ekran = (function () {
       }
     }
 
+    if (onbellekten) {
+      Yard.bildir('bilgi', onbellekten + ' alındının detayı bu oturumda zaten alınmıştı, ' +
+        'tekrar sorulmadı (' + onbellekten + ' istek tasarrufu).');
+    }
     if (elenen) Yard.bildir('bilgi', elenen + ' alındı süzgece uymadığı için alınmadı.');
     if (cozulemeyen) {
       Yard.bildir('uyari', cozulemeyen + ' satırın vergi dönemi/dairesi okunamadı; ' +

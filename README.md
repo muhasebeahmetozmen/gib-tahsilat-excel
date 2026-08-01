@@ -98,7 +98,10 @@ biçimindedir (Excel bilimsel gösterime çevirmez, baştaki sıfırları silmez
 - Sunucuya saygılı çalışır: istekler sıralı ve aralıklı atılır, sınır uyarısı gelirse durur.
 - Tarayıcıda kalıcı olarak **yalnızca tek şey** tutulur: hangi yıllarda kaydınız
   olduğunun listesi (her sorguda 11 istek atmamak için). Bu kayıtta kimlik numarası
-  **açık hâlde yazılmaz**, en fazla 25 mükellef tutulur ve 12 saatte bir tazelenir.
+  **açık hâlde yazılmaz**, en fazla 200 mükellef tutulur ve 12 saatte bir tazelenir.
   Silmek isterseniz tarayıcı geçmişinden site verilerini temizlemeniz yeterli.
+- Tahsilat verisinin kendisi **hiçbir zaman diske yazılmaz**. Aynı oturumda tekrar
+  sorgu yaparsanız alındı detayları yalnızca **bellekte** tutulup tekrar kullanılır;
+  sekmeyi kapattığınızda ya da başka bir mükellefe geçtiğinizde silinir.
 - Resmî bir GİB ürünü değildir.
 - İndirdiğiniz Excel ve zip dosyaları vergi verisi içerir; paylaşırken dikkat edin.
